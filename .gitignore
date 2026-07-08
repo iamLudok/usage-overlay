@@ -1,0 +1,19 @@
+# runtime state, not source
+usage-overlay.pid
+*.pid
+usage-cache.json
+*.log
+
+# local dependencies and scratch config
+node_modules/
+.env
+.env.*
+*.local
+
+# provider credential/session data that should never be copied into the repo
+.credentials.json
+state.vscdb
+opencode.db
+rollout-*.jsonl
+*.db
+*.sqlite
