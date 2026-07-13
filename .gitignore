@@ -5,6 +5,7 @@ usage-cache.json
 *.log
 
 # local dependencies and scratch config
+config.json
 node_modules/
 .env
 .env.*
