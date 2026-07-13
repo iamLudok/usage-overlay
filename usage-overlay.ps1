@@ -18,6 +18,13 @@ if (Test-Path $pidFile) {
 }
 Set-Content -Path $pidFile -Value $PID -Encoding ascii
 
+# node.exe for the Cursor/OpenCode helper scripts: prefer whatever is on
+# PATH (nvm, scoop, winget, ...), fall back to the default installer path.
+$nodeExe = (Get-Command node -ErrorAction SilentlyContinue).Source
+if (-not $nodeExe -and (Test-Path 'C:\Program Files\nodejs\node.exe')) {
+    $nodeExe = 'C:\Program Files\nodejs\node.exe'
+}
+
 # ---------- data ----------
 
 function Get-ClaudeUsage {
@@ -75,9 +82,8 @@ function Get-CodexUsage {
 
 function Get-CursorUsage {
     try {
-        $node = 'C:\Program Files\nodejs\node.exe'
-        if (-not (Test-Path $node)) { return @{ ok = $false; err = 'node missing' } }
-        $json = & $node (Join-Path $dir 'cursor-usage.js')
+        if (-not $nodeExe) { return @{ ok = $false; err = 'node missing' } }
+        $json = & $nodeExe (Join-Path $dir 'cursor-usage.js')
         if (-not $json) { return @{ ok = $false; err = 'no data' } }
         $j = $json | ConvertFrom-Json
         if ($j.error) { return @{ ok = $false; err = 'fetch failed' } }
@@ -95,9 +101,8 @@ function Get-OpenCodeUsage {
     # OpenCode Zen has no quota API from the local key, so we show locally
     # tracked spend instead of a % bar (rendered as a plain text line).
     try {
-        $node = 'C:\Program Files\nodejs\node.exe'
-        if (-not (Test-Path $node)) { return @{ ok = $false; err = 'node missing' } }
-        $json = & $node (Join-Path $dir 'opencode-usage.js')
+        if (-not $nodeExe) { return @{ ok = $false; err = 'node missing' } }
+        $json = & $nodeExe (Join-Path $dir 'opencode-usage.js')
         if (-not $json) { return @{ ok = $false; err = 'no data' } }
         $j = $json | ConvertFrom-Json
         if ($j.error) { return @{ ok = $false; err = 'read failed' } }
