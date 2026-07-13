@@ -80,7 +80,8 @@ function Get-ClaudeUsage {
         foreach ($lim in $r.limits) {
             if ($lim.kind -eq 'weekly_scoped' -and $lim.scope.model.display_name) {
                 $name = $lim.scope.model.display_name.ToLower().Substring(0, [Math]::Min(3, $lim.scope.model.display_name.Length))
-                $rows += [pscustomobject]@{ Label = $name; Pct = [double]$lim.percent; Resets = [datetime]$lim.resets_at }
+                $resets = if ($lim.resets_at) { [datetime]$lim.resets_at } else { $null }
+                $rows += [pscustomobject]@{ Label = $name; Pct = [double]$lim.percent; Resets = $resets }
             }
         }
         return @{ ok = $true; rows = $rows }
@@ -158,7 +159,8 @@ function Get-OpenCodeUsage {
 
 # ---------- rendering helpers ----------
 
-function Format-Reset([datetime]$t) {
+function Format-Reset($t) {
+    if (-not $t) { return '--' }
     $span = $t.ToLocalTime() - (Get-Date)
     if ($span.TotalMinutes -le 0) { return 'now' }
     if ($span.TotalHours -lt 1) { return ('{0}m' -f [Math]::Ceiling($span.TotalMinutes)) }
