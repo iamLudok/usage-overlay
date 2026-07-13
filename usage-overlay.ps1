@@ -18,6 +18,46 @@ if (Test-Path $pidFile) {
 }
 Set-Content -Path $pidFile -Value $PID -Encoding ascii
 
+# ---------- config ----------
+
+# Optional config.json next to the script; any key below can be overridden.
+# "sections": "auto" shows only the tools with local data on this machine,
+# or list them explicitly, e.g. ["claude", "codex"].
+$cfg = @{
+    corner         = 'top-right'   # top-right | top-left | bottom-right | bottom-left
+    marginX        = 14
+    marginY        = 14
+    refreshSeconds = 60
+    sections       = 'auto'
+}
+$cfgFile = Join-Path $dir 'config.json'
+if (Test-Path $cfgFile) {
+    try {
+        $userCfg = Get-Content $cfgFile -Raw | ConvertFrom-Json
+        foreach ($p in $userCfg.PSObject.Properties) { $cfg[$p.Name] = $p.Value }
+    } catch {}
+}
+if ($cfg.corner -notin @('top-right', 'top-left', 'bottom-right', 'bottom-left')) { $cfg.corner = 'top-right' }
+$cfg.refreshSeconds = [Math]::Max(15, [int]$cfg.refreshSeconds)
+$cfg.marginX = [double]$cfg.marginX
+$cfg.marginY = [double]$cfg.marginY
+
+# With "auto", a section is kept only if its tool left data on this machine,
+# so tools you don't use don't show up as permanent errors.
+$detected = [ordered]@{
+    claude   = (Test-Path "$env:USERPROFILE\.claude\.credentials.json")
+    codex    = (Test-Path "$env:USERPROFILE\.codex\sessions")
+    cursor   = (Test-Path "$env:APPDATA\Cursor\User\globalStorage\state.vscdb")
+    opencode = (Test-Path "$env:USERPROFILE\.local\share\opencode\opencode.db")
+}
+if ("$($cfg.sections)" -eq 'auto') {
+    $enabledSections = @($detected.Keys | Where-Object { $detected[$_] })
+    # nothing detected at all: show everything, like before
+    if (-not $enabledSections) { $enabledSections = @($detected.Keys) }
+} else {
+    $enabledSections = @($cfg.sections | ForEach-Object { "$_".ToLower() })
+}
+
 # ---------- data ----------
 
 function Get-ClaudeUsage {
@@ -255,7 +295,7 @@ function Build-Panel {
     Add-Panel "  r 3h / r 45m / r now" $T; Add-Panel " = time until that window resets`n`n" $M
 
     Add-Panel "REFRESH`n" $H $true
-    Add-Panel "  the overlay redraws every 60s`n" $M
+    Add-Panel "  the overlay redraws every $($cfg.refreshSeconds)s`n" $M
     Add-Panel "  CODEX" $T; Add-Panel " every tick (local file, free)`n" $M
     Add-Panel "  CLAUDE" $T; Add-Panel " + " $M; Add-Panel "CURSOR" $T
     Add-Panel " every 3rd tick (~3 min): remote APIs,`n    throttled so they don't return HTTP 429`n" $M
@@ -291,8 +331,10 @@ function Build-Panel {
 $script:panelOpen = $false
 function Set-PanelPosition {
     $wa = [System.Windows.SystemParameters]::WorkArea
-    $panel.Left = $wa.Right - $panel.ActualWidth - 14
-    $panel.Top = $window.Top + $window.ActualHeight + 8
+    $panel.Left = if ($cfg.corner -like '*-left') { $wa.Left + $cfg.marginX }
+                  else { $wa.Right - $panel.ActualWidth - $cfg.marginX }
+    $panel.Top = if ($cfg.corner -like 'bottom-*') { $window.Top - $panel.ActualHeight - 8 }
+                 else { $window.Top + $window.ActualHeight + 8 }
 }
 function Toggle-Panel {
     if ($script:panelOpen) {
@@ -348,18 +390,20 @@ function Render {
     # Codex is a local file read: every tick. Claude and Cursor hit remote
     # APIs that rate-limit: every 3rd tick (3 min).
     $remoteDue = ($script:tick % 3 -eq 0)
-    $claude = Update-Source 'claude' ${function:Get-ClaudeUsage} $remoteDue
-    $codex = Update-Source 'codex' ${function:Get-CodexUsage} $true
-    $cursor = Update-Source 'cursor' ${function:Get-CursorUsage} $remoteDue
-    $opencode = Update-Source 'opencode' ${function:Get-OpenCodeUsage} $true
+    $specs = @(
+        @{ key = 'claude';   name = 'CLAUDE'; fetch = ${function:Get-ClaudeUsage};   due = $remoteDue },
+        @{ key = 'codex';    name = 'CODEX '; fetch = ${function:Get-CodexUsage};    due = $true },
+        @{ key = 'cursor';   name = 'CURSOR'; fetch = ${function:Get-CursorUsage};   due = $remoteDue },
+        @{ key = 'opencode'; name = 'OPENCD'; fetch = ${function:Get-OpenCodeUsage}; due = $true }
+    )
 
     $body.Inlines.Clear()
-    $sections = @(
-        @{ name = 'CLAUDE'; data = $claude },
-        @{ name = 'CODEX '; data = $codex },
-        @{ name = 'CURSOR'; data = $cursor },
-        @{ name = 'OPENCD'; data = $opencode }
-    )
+    $sections = @()
+    foreach ($spec in $specs) {
+        if ($enabledSections -contains $spec.key) {
+            $sections += @{ name = $spec.name; data = (Update-Source $spec.key $spec.fetch $spec.due) }
+        }
+    }
     $first = $true
     $anyStale = $false
     foreach ($s in $sections) {
@@ -403,10 +447,14 @@ function Render {
 
 function Set-Position {
     $wa = [System.Windows.SystemParameters]::WorkArea
-    $window.Left = $wa.Right - $window.ActualWidth - 14
-    $window.Top = $wa.Top + 14
-    # "?" button (30px hit area) sits just left of the overlay's top row
-    $btnWindow.Left = $window.Left - 34
+    $window.Left = if ($cfg.corner -like '*-left') { $wa.Left + $cfg.marginX }
+                   else { $wa.Right - $window.ActualWidth - $cfg.marginX }
+    $window.Top = if ($cfg.corner -like 'bottom-*') { $wa.Bottom - $window.ActualHeight - $cfg.marginY }
+                  else { $wa.Top + $cfg.marginY }
+    # "?" button (30px hit area) sits beside the overlay's top row, on the
+    # side that faces the middle of the screen
+    $btnWindow.Left = if ($cfg.corner -like '*-left') { $window.Left + $window.ActualWidth + 4 }
+                      else { $window.Left - 34 }
     $btnWindow.Top = $window.Top - 4
     if ($script:panelOpen) { Set-PanelPosition }
 }
@@ -415,7 +463,7 @@ $window.Add_ContentRendered({ Set-Position })
 $window.Add_SizeChanged({ Set-Position })
 
 $timer = New-Object System.Windows.Threading.DispatcherTimer
-$timer.Interval = [TimeSpan]::FromSeconds(60)
+$timer.Interval = [TimeSpan]::FromSeconds($cfg.refreshSeconds)
 $timer.Add_Tick({ try { Render } catch {} })
 
 $window.Add_Loaded({
