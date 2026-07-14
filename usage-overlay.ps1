@@ -355,69 +355,54 @@ function Build-Panel {
     Add-Panel "  quota across your coding agents`n`n" $M
 
     Add-Panel "COLORS`n" $H $true
-    Add-Panel "  " $M; Add-Panel "green" $GREEN; Add-Panel "  under 60% used, plenty left`n" $M
-    Add-Panel "  " $M; Add-Panel "amber" $AMBER; Add-Panel "  60-84%, getting tight`n" $M
-    Add-Panel "  " $M; Add-Panel "red  " $RED;   Add-Panel "  85%+ , nearly capped`n" $M
-    Add-Panel "  an " $M; Add-Panel "amber section name" $AMBER
-    Add-Panel " = showing cached numbers, not live (see REFRESH)`n`n" $M
+    Add-Panel "  " $M; Add-Panel "green" $GREEN; Add-Panel " <60%   " $M
+    Add-Panel "amber" $AMBER; Add-Panel " 60-84%   " $M
+    Add-Panel "red" $RED; Add-Panel " 85%+`n" $M
+    Add-Panel "  amber section name = cached, not live`n`n" $M
 
-    Add-Panel "BAR & RESET`n" $H $true
-    Add-Panel "  the ##---- bar is 10 cells, one per ~10% used`n" $M
-    Add-Panel "  r 3h / r 45m / r now" $T; Add-Panel " = time until that window resets`n`n" $M
-
-    Add-Panel "MOVE & TRAY`n" $H $true
-    Add-Panel "  hold Ctrl and drag the overlay to move it (position is saved)`n" $M
-    Add-Panel "  tray icon menu: refresh now, restart, exit`n`n" $M
+    Add-Panel "BAR, RESET & MOVE`n" $H $true
+    Add-Panel "  ##---- = 10 cells, ~10% each   " $M
+    Add-Panel "r 3h / 45m / now" $T; Add-Panel " = time to reset`n" $M
+    Add-Panel "  Ctrl+drag to move (position saved)   tray icon: refresh, restart, exit`n`n" $M
 
     Add-Panel "REFRESH`n" $H $true
-    Add-Panel "  the overlay redraws every $($cfg.refreshSeconds)s`n" $M
-    Add-Panel "  CODEX" $T; Add-Panel " every tick (local file, free)`n" $M
-    Add-Panel "  CLAUDE" $T; Add-Panel " + " $M; Add-Panel "CURSOR" $T
-    Add-Panel " every 3rd tick (~3 min): remote APIs,`n    throttled so they don't return HTTP 429`n" $M
-    Add-Panel "  on any failure it keeps the last good value (" $M
-    Add-Panel "amber" $AMBER; Add-Panel ") and`n    retries next cycle; cache is saved to disk across restarts`n`n" $M
+    Add-Panel "  every $($cfg.refreshSeconds)s; " $M
+    Add-Panel "CLAUDE/CURSOR/COPILT" $T; Add-Panel " (remote) every 3rd tick`n" $M
+    Add-Panel "  on failure, keeps the last value (" $M; Add-Panel "amber" $AMBER
+    Add-Panel "), cached to disk`n`n" $M
 
     Add-Panel "SOURCES`n" $H $true
-    Add-Panel "  CLAUDE" $T; Add-Panel "  api.anthropic.com/api/oauth/usage; OAuth token`n" $M
-    Add-Panel "    from ~/.claude/.credentials.json (Claude Code refreshes it)`n" $M
-    Add-Panel "    5h" $T; Add-Panel " rolling session   " $M
-    Add-Panel "wk" $T; Add-Panel " 7-day all   " $M
-    Add-Panel "fab" $T; Add-Panel " Fable weekly cap`n" $M
-    Add-Panel "  CODEX" $T; Add-Panel "   newest ~/.codex/sessions rollout log, last`n" $M
-    Add-Panel "    rate_limits event: a snapshot from your last Codex turn,`n    so it is only as fresh as your last Codex use`n" $M
-    Add-Panel "    5h" $T; Add-Panel " 5-hour   " $M; Add-Panel "wk" $T; Add-Panel " weekly`n" $M
-    Add-Panel "  CURSOR" $T; Add-Panel "  cursor.com/api/usage-summary via the session`n" $M
-    Add-Panel "    token in Cursor's state.vscdb (no login needed)`n" $M
-    Add-Panel "    api" $T; Add-Panel " named-model API usage   " $M
-    Add-Panel "tot" $T; Add-Panel " total included`n" $M
-    Add-Panel "  COPILT" $T; Add-Panel "  api.github.com billing report, PAT from config.json`n" $M
-    Add-Panel "    (githubUser/githubToken); " $M
-    Add-Panel "mo" $T; Add-Panel " = monthly AI credits used`n" $M
-    Add-Panel "  OPENCD" $T; Add-Panel "  Zen has no quota API from the local key, so`n" $M
-    Add-Panel "    this shows local spend from opencode.db, not a % cap`n" $M
-    Add-Panel "    mo" $T; Add-Panel " this-month `$   " $M
-    Add-Panel "all" $T; Add-Panel " all-time `$ + tokens`n`n" $M
+    Add-Panel "  CLAUDE" $T; Add-Panel "   Anthropic OAuth token   " $M; Add-Panel "5h/wk/fab`n" $T
+    Add-Panel "  CODEX" $T; Add-Panel "   last local session log   " $M; Add-Panel "5h/wk`n" $T
+    Add-Panel "  CURSOR" $T; Add-Panel "  session token from Cursor's state.vscdb   " $M; Add-Panel "api/tot`n" $T
+    Add-Panel "  COPILT" $T; Add-Panel "  PAT from config.json   " $M; Add-Panel "mo" $T
+    Add-Panel " = AI credits used`n" $M
+    Add-Panel "  OPENCD" $T; Add-Panel "  local spend, no quota API   " $M; Add-Panel "mo/all" $T
+    Add-Panel " = `$ spent`n`n" $M
 
     Add-Panel "ERRORS`n" $H $true
-    Add-Panel "  rate limited" $T; Add-Panel " 429, backing off   " $M
-    Add-Panel "auth stale" $T; Add-Panel " 401, reopen the app`n" $M
-    Add-Panel "  offline" $T; Add-Panel " no network   " $M
-    Add-Panel "no token" $T; Add-Panel " COPILT not configured yet`n" $M
-    Add-Panel "  no permission" $T; Add-Panel " PAT missing the Plan scope   " $M
-    Add-Panel "check user" $T; Add-Panel " githubUser is wrong`n`n" $M
+    Add-Panel "  rate limited" $T; Add-Panel "=429   " $M
+    Add-Panel "auth stale" $T; Add-Panel "=401   " $M
+    Add-Panel "offline" $T; Add-Panel "=network`n" $M
+    Add-Panel "  no token / no permission / check user" $T; Add-Panel " = fix config.json (COPILT)`n`n" $M
 
-    Add-Panel "click this panel or the ? button to close" $M
+    Add-Panel "click to close" $M
 }
 
 $script:panelOpen = $false
 function Set-PanelPosition {
+    # force a layout pass now, since this runs before Show() and a stale
+    # (e.g. zero) ActualHeight would make the below/above decision below
+    # unreliable
+    $panel.UpdateLayout()
     $wa = [System.Windows.SystemParameters]::WorkArea
-    # align with the overlay, clamped to the work area; open below if there
-    # is room, otherwise above
+    # align with the overlay; open below if there is room, otherwise above
     $panel.Left = [Math]::Max($wa.Left, [Math]::Min($window.Left, $wa.Right - $panel.ActualWidth))
     $panel.Top = if ($window.Top + $window.ActualHeight + 8 + $panel.ActualHeight -le $wa.Bottom) {
                      $window.Top + $window.ActualHeight + 8
                  } else { $window.Top - $panel.ActualHeight - 8 }
+    # whatever was picked above, never let the panel land off-screen
+    $panel.Top = [Math]::Max($wa.Top, [Math]::Min($panel.Top, $wa.Bottom - $panel.ActualHeight))
 }
 function Toggle-Panel {
     if ($script:panelOpen) {
