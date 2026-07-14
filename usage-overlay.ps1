@@ -31,11 +31,14 @@ if (-not $nodeExe -and (Test-Path 'C:\Program Files\nodejs\node.exe')) {
 # "sections": "auto" shows only the tools with local data on this machine,
 # or list them explicitly, e.g. ["claude", "codex"].
 $cfg = @{
-    corner         = 'top-right'   # top-right | top-left | bottom-right | bottom-left
-    marginX        = 14
-    marginY        = 14
-    refreshSeconds = 60
-    sections       = 'auto'
+    corner          = 'top-right'   # top-right | top-left | bottom-right | bottom-left
+    marginX         = 14
+    marginY         = 14
+    refreshSeconds  = 60
+    sections        = 'auto'
+    githubUser      = ''
+    githubToken     = ''
+    copilotIncluded = 200   # monthly AI credits included in your Copilot plan
 }
 $cfgFile = Join-Path $dir 'config.json'
 if (Test-Path $cfgFile) {
@@ -45,28 +48,44 @@ if (Test-Path $cfgFile) {
     } catch {}
 }
 if ($cfg.corner -notin @('top-right', 'top-left', 'bottom-right', 'bottom-left')) { $cfg.corner = 'top-right' }
-$cfg.refreshSeconds = [Math]::Max(15, [int]$cfg.refreshSeconds)
-$cfg.marginX = [double]$cfg.marginX
-$cfg.marginY = [double]$cfg.marginY
+# A bad config.json value (typo, wrong type) must never stop the overlay from
+# showing up at all: fall back to the default for that one key instead.
+try { $cfg.refreshSeconds = [Math]::Max(15, [int]$cfg.refreshSeconds) } catch { $cfg.refreshSeconds = 60 }
+try { $cfg.marginX = [double]$cfg.marginX } catch { $cfg.marginX = 14 }
+try { $cfg.marginY = [double]$cfg.marginY } catch { $cfg.marginY = 14 }
 
 # With "auto", a section is kept only if its tool left data on this machine,
 # so tools you don't use don't show up as permanent errors.
+$hasCopilotConfig = ("$($cfg.githubToken)" -ne '' -and "$($cfg.githubUser)" -ne '')
 $detected = [ordered]@{
     claude   = (Test-Path "$env:USERPROFILE\.claude\.credentials.json")
     codex    = (Test-Path "$env:USERPROFILE\.codex\sessions")
     cursor   = (Test-Path "$env:APPDATA\Cursor\User\globalStorage\state.vscdb")
-    copilot  = ("$($cfg.githubToken)" -ne '' -and "$($cfg.githubUser)" -ne '')
+    copilot  = $hasCopilotConfig
     opencode = (Test-Path "$env:USERPROFILE\.local\share\opencode\opencode.db")
 }
 if ("$($cfg.sections)" -eq 'auto') {
     $enabledSections = @($detected.Keys | Where-Object { $detected[$_] })
-    # nothing detected at all: show everything, like before
-    if (-not $enabledSections) { $enabledSections = @($detected.Keys) }
+    # nothing detected at all: show everything except copilot, which needs
+    # a token nobody has typed in yet and would otherwise show a permanent
+    # error with no local trace of the tool to justify it
+    if (-not $enabledSections) { $enabledSections = @($detected.Keys | Where-Object { $_ -ne 'copilot' }) }
 } else {
     $enabledSections = @($cfg.sections | ForEach-Object { "$_".ToLower() })
 }
 
 # ---------- data ----------
+
+# Shared HTTP-status -> user-facing label mapping, so the wording stays
+# consistent with the ERRORS legend in the help panel across sources.
+function Get-HttpErrLabel([int]$status, [hashtable]$extra = @{}) {
+    if ($extra.ContainsKey($status)) { return $extra[$status] }
+    switch ($status) {
+        401 { return 'auth stale' }
+        429 { return 'rate limited' }
+        default { return 'offline' }
+    }
+}
 
 function Get-ClaudeUsage {
     try {
@@ -76,8 +95,10 @@ function Get-ClaudeUsage {
             'anthropic-beta' = 'oauth-2025-04-20'
         }
         $rows = @()
-        $rows += [pscustomobject]@{ Label = '5h '; Pct = [double]$r.five_hour.utilization; Resets = [datetime]$r.five_hour.resets_at }
-        $rows += [pscustomobject]@{ Label = 'wk '; Pct = [double]$r.seven_day.utilization; Resets = [datetime]$r.seven_day.resets_at }
+        $fiveHourResets = if ($r.five_hour.resets_at) { [datetime]$r.five_hour.resets_at } else { $null }
+        $weekResets = if ($r.seven_day.resets_at) { [datetime]$r.seven_day.resets_at } else { $null }
+        $rows += [pscustomobject]@{ Label = '5h '; Pct = [double]$r.five_hour.utilization; Resets = $fiveHourResets }
+        $rows += [pscustomobject]@{ Label = 'wk '; Pct = [double]$r.seven_day.utilization; Resets = $weekResets }
         foreach ($lim in $r.limits) {
             if ($lim.kind -eq 'weekly_scoped' -and $lim.scope.model.display_name) {
                 $name = $lim.scope.model.display_name.ToLower().Substring(0, [Math]::Min(3, $lim.scope.model.display_name.Length))
@@ -88,12 +109,7 @@ function Get-ClaudeUsage {
         return @{ ok = $true; rows = $rows }
     } catch {
         $status = try { [int]$_.Exception.Response.StatusCode } catch { 0 }
-        $err = switch ($status) {
-            429 { 'rate limited' }
-            401 { 'auth stale' }
-            default { 'offline' }
-        }
-        return @{ ok = $false; err = $err }
+        return @{ ok = $false; err = (Get-HttpErrLabel $status) }
     }
 }
 
@@ -145,7 +161,8 @@ function Get-CopilotUsage {
     # (fine-grained PAT with Plan: read-only) and copilotIncluded (monthly
     # included AI credits; the API only reports consumption, not the limit).
     try {
-        $now = Get-Date
+        if ("$($cfg.githubUser)" -eq '' -or "$($cfg.githubToken)" -eq '') { return @{ ok = $false; err = 'no token' } }
+        $now = [datetime]::UtcNow
         $uri = "https://api.github.com/users/$($cfg.githubUser)/settings/billing/ai_credit/usage?year=$($now.Year)&month=$($now.Month)"
         $r = Invoke-RestMethod -Uri $uri -TimeoutSec 8 -Headers @{
             Authorization          = "Bearer $($cfg.githubToken)"
@@ -156,7 +173,7 @@ function Get-CopilotUsage {
         foreach ($item in $r.usageItems) {
             if (-not $item.product -or $item.product -eq 'copilot') { $used += [double]$item.grossQuantity }
         }
-        $included = if ("$($cfg.copilotIncluded)" -ne '') { [double]$cfg.copilotIncluded } else { 200.0 }
+        $included = try { [double]$cfg.copilotIncluded } catch { 200.0 }
         $pct = if ($included -gt 0) { $used / $included * 100 } else { 0 }
         # AI credits reset on the 1st of each month, 00:00 UTC
         $resets = [datetime]::new($now.Year, $now.Month, 1, 0, 0, 0, [DateTimeKind]::Utc).AddMonths(1)
@@ -166,13 +183,10 @@ function Get-CopilotUsage {
         return @{ ok = $true; rows = $rows }
     } catch {
         $status = try { [int]$_.Exception.Response.StatusCode } catch { 0 }
-        $err = switch ($status) {
-            401 { 'auth stale' }
-            403 { 'rate limited' }
-            404 { 'check user' }
-            429 { 'rate limited' }
-            default { 'offline' }
-        }
+        # 403 here is almost always a PAT missing the "Plan" read permission,
+        # not GitHub's secondary rate limit, so it gets its own label rather
+        # than being lumped in with 429.
+        $err = Get-HttpErrLabel $status @{ 403 = 'no permission'; 404 = 'check user' }
         return @{ ok = $false; err = $err }
     }
 }
@@ -387,7 +401,10 @@ function Build-Panel {
     Add-Panel "ERRORS`n" $H $true
     Add-Panel "  rate limited" $T; Add-Panel " 429, backing off   " $M
     Add-Panel "auth stale" $T; Add-Panel " 401, reopen the app`n" $M
-    Add-Panel "  offline" $T; Add-Panel " no network`n`n" $M
+    Add-Panel "  offline" $T; Add-Panel " no network   " $M
+    Add-Panel "no token" $T; Add-Panel " COPILT not configured yet`n" $M
+    Add-Panel "  no permission" $T; Add-Panel " PAT missing the Plan scope   " $M
+    Add-Panel "check user" $T; Add-Panel " githubUser is wrong`n`n" $M
 
     Add-Panel "click this panel or the ? button to close" $M
 }
@@ -514,10 +531,15 @@ function Render {
 
 function Set-Position {
     $wa = [System.Windows.SystemParameters]::WorkArea
-    # a dragged position (saved as x/y in config.json) wins over the corner
-    if ($cfg.ContainsKey('x') -and $cfg.ContainsKey('y')) {
-        $window.Left = [double]$cfg.x
-        $window.Top = [double]$cfg.y
+    # a dragged position (saved as x/y in config.json) wins over the corner,
+    # but is clamped to the current work area so a monitor change (or a
+    # corrupted value) can never push the click-through overlay off-screen
+    # with no way to grab it back
+    $savedX = if ($cfg.ContainsKey('x')) { try { [double]$cfg.x } catch { $null } } else { $null }
+    $savedY = if ($cfg.ContainsKey('y')) { try { [double]$cfg.y } catch { $null } } else { $null }
+    if ($null -ne $savedX -and $null -ne $savedY) {
+        $window.Left = [Math]::Max($wa.Left, [Math]::Min($savedX, $wa.Right - $window.ActualWidth))
+        $window.Top = [Math]::Max($wa.Top, [Math]::Min($savedY, $wa.Bottom - $window.ActualHeight))
     } else {
         $window.Left = if ($cfg.corner -like '*-left') { $wa.Left + $cfg.marginX }
                        else { $wa.Right - $window.ActualWidth - $cfg.marginX }
@@ -533,14 +555,18 @@ function Set-Position {
 }
 
 # Persist the current window position into config.json, keeping any other
-# keys the user has set there.
+# keys the user has set there. If the file can't be read back (a hand-edit
+# left invalid JSON), we skip the write rather than overwrite it with only
+# x/y and silently lose the rest of the user's settings (token included).
 function Save-Config {
     $obj = [ordered]@{}
     if (Test-Path $cfgFile) {
         try {
             (Get-Content $cfgFile -Raw | ConvertFrom-Json).PSObject.Properties |
                 ForEach-Object { $obj[$_.Name] = $_.Value }
-        } catch {}
+        } catch {
+            return
+        }
     }
     $obj['x'] = $cfg.x
     $obj['y'] = $cfg.y
@@ -567,7 +593,12 @@ $ctrlTimer.Start()
 
 $window.Add_MouseLeftButtonDown({
     if (-not $script:interactive) { return }
+    $startLeft = $window.Left
+    $startTop = $window.Top
     try { $window.DragMove() } catch {}
+    # a Ctrl+click with no real movement (e.g. Ctrl held for an unrelated
+    # reason) must not switch the overlay into fixed-position mode
+    if ($window.Left -eq $startLeft -and $window.Top -eq $startTop) { return }
     # remember where it was dropped, across restarts
     $cfg['x'] = [Math]::Round($window.Left)
     $cfg['y'] = [Math]::Round($window.Top)
@@ -605,7 +636,11 @@ $notify.Visible = $true
 $trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
 $null = $trayMenu.Items.Add('Refresh now', $null, { try { Render } catch {} })
 $null = $trayMenu.Items.Add('Restart', $null, {
-    Start-Process powershell -ArgumentList '-WindowStyle', 'Hidden', '-File', (Join-Path $dir 'usage-overlay.ps1') -WindowStyle Hidden
+    # a single quoted string, not an array: PowerShell 5.1's Start-Process
+    # joins ArgumentList array elements with spaces but does NOT quote them,
+    # so an install path containing a space would otherwise split in two
+    $scriptPath = Join-Path $dir 'usage-overlay.ps1'
+    Start-Process powershell -ArgumentList "-WindowStyle Hidden -File `"$scriptPath`"" -WindowStyle Hidden
 })
 $null = $trayMenu.Items.Add('Exit', $null, { $app.Shutdown() })
 $notify.ContextMenuStrip = $trayMenu
