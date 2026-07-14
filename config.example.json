@@ -3,5 +3,8 @@
   "marginX": 14,
   "marginY": 14,
   "refreshSeconds": 60,
-  "sections": "auto"
+  "sections": "auto",
+  "githubUser": "",
+  "githubToken": "",
+  "copilotIncluded": 200
 }

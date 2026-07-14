@@ -55,6 +55,7 @@ $detected = [ordered]@{
     claude   = (Test-Path "$env:USERPROFILE\.claude\.credentials.json")
     codex    = (Test-Path "$env:USERPROFILE\.codex\sessions")
     cursor   = (Test-Path "$env:APPDATA\Cursor\User\globalStorage\state.vscdb")
+    copilot  = ("$($cfg.githubToken)" -ne '' -and "$($cfg.githubUser)" -ne '')
     opencode = (Test-Path "$env:USERPROFILE\.local\share\opencode\opencode.db")
 }
 if ("$($cfg.sections)" -eq 'auto') {
@@ -138,6 +139,44 @@ function Get-CursorUsage {
     }
 }
 
+function Get-CopilotUsage {
+    # GitHub Copilot AI-credit usage for a personal account, from the
+    # official billing report. Needs in config.json: githubUser, githubToken
+    # (fine-grained PAT with Plan: read-only) and copilotIncluded (monthly
+    # included AI credits; the API only reports consumption, not the limit).
+    try {
+        $now = Get-Date
+        $uri = "https://api.github.com/users/$($cfg.githubUser)/settings/billing/ai_credit/usage?year=$($now.Year)&month=$($now.Month)"
+        $r = Invoke-RestMethod -Uri $uri -TimeoutSec 8 -Headers @{
+            Authorization          = "Bearer $($cfg.githubToken)"
+            Accept                 = 'application/vnd.github+json'
+            'X-GitHub-Api-Version' = '2026-03-10'
+        }
+        $used = 0.0
+        foreach ($item in $r.usageItems) {
+            if (-not $item.product -or $item.product -eq 'copilot') { $used += [double]$item.grossQuantity }
+        }
+        $included = if ("$($cfg.copilotIncluded)" -ne '') { [double]$cfg.copilotIncluded } else { 200.0 }
+        $pct = if ($included -gt 0) { $used / $included * 100 } else { 0 }
+        # AI credits reset on the 1st of each month, 00:00 UTC
+        $resets = [datetime]::new($now.Year, $now.Month, 1, 0, 0, 0, [DateTimeKind]::Utc).AddMonths(1)
+        $rows = @(
+            [pscustomobject]@{ Label = 'mo '; Pct = $pct; Resets = $resets }
+        )
+        return @{ ok = $true; rows = $rows }
+    } catch {
+        $status = try { [int]$_.Exception.Response.StatusCode } catch { 0 }
+        $err = switch ($status) {
+            401 { 'auth stale' }
+            403 { 'rate limited' }
+            404 { 'check user' }
+            429 { 'rate limited' }
+            default { 'offline' }
+        }
+        return @{ ok = $false; err = $err }
+    }
+}
+
 function Get-OpenCodeUsage {
     # OpenCode Zen has no quota API from the local key, so we show locally
     # tracked spend instead of a % bar (rendered as a plain text line).
@@ -164,6 +203,7 @@ function Format-Reset($t) {
     $span = $t.ToLocalTime() - (Get-Date)
     if ($span.TotalMinutes -le 0) { return 'now' }
     if ($span.TotalHours -lt 1) { return ('{0}m' -f [Math]::Ceiling($span.TotalMinutes)) }
+    if ($span.TotalHours -ge 48) { return ('{0}d' -f [Math]::Round($span.TotalDays)) }
     return ('{0}h' -f [Math]::Round($span.TotalHours))
 }
 
@@ -242,6 +282,7 @@ using System.Runtime.InteropServices;
 public static class Win32Ex {
     [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
     [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
+    [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
 }
 "@
 $GWL_EXSTYLE = -20
@@ -254,6 +295,15 @@ function Set-ExStyle($win, [int]$add) {
     $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper($win)).Handle
     $ex = [Win32Ex]::GetWindowLong($hwnd, $GWL_EXSTYLE)
     [Win32Ex]::SetWindowLong($hwnd, $GWL_EXSTYLE, $ex -bor $add) | Out-Null
+}
+
+# Toggle only the click-through bit, so the overlay can catch the mouse
+# while Ctrl is held (to be dragged) and go back to click-through after.
+function Set-ClickThrough($win, [bool]$on) {
+    $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper($win)).Handle
+    $ex = [Win32Ex]::GetWindowLong($hwnd, $GWL_EXSTYLE)
+    $ex = if ($on) { $ex -bor $WS_EX_TRANSPARENT } else { $ex -band (-bnot $WS_EX_TRANSPARENT) }
+    [Win32Ex]::SetWindowLong($hwnd, $GWL_EXSTYLE, $ex) | Out-Null
 }
 
 $window.Add_SourceInitialized({
@@ -301,6 +351,10 @@ function Build-Panel {
     Add-Panel "  the ##---- bar is 10 cells, one per ~10% used`n" $M
     Add-Panel "  r 3h / r 45m / r now" $T; Add-Panel " = time until that window resets`n`n" $M
 
+    Add-Panel "MOVE & TRAY`n" $H $true
+    Add-Panel "  hold Ctrl and drag the overlay to move it (position is saved)`n" $M
+    Add-Panel "  tray icon menu: refresh now, restart, exit`n`n" $M
+
     Add-Panel "REFRESH`n" $H $true
     Add-Panel "  the overlay redraws every $($cfg.refreshSeconds)s`n" $M
     Add-Panel "  CODEX" $T; Add-Panel " every tick (local file, free)`n" $M
@@ -322,6 +376,9 @@ function Build-Panel {
     Add-Panel "    token in Cursor's state.vscdb (no login needed)`n" $M
     Add-Panel "    api" $T; Add-Panel " named-model API usage   " $M
     Add-Panel "tot" $T; Add-Panel " total included`n" $M
+    Add-Panel "  COPILT" $T; Add-Panel "  api.github.com billing report, PAT from config.json`n" $M
+    Add-Panel "    (githubUser/githubToken); " $M
+    Add-Panel "mo" $T; Add-Panel " = monthly AI credits used`n" $M
     Add-Panel "  OPENCD" $T; Add-Panel "  Zen has no quota API from the local key, so`n" $M
     Add-Panel "    this shows local spend from opencode.db, not a % cap`n" $M
     Add-Panel "    mo" $T; Add-Panel " this-month `$   " $M
@@ -338,10 +395,12 @@ function Build-Panel {
 $script:panelOpen = $false
 function Set-PanelPosition {
     $wa = [System.Windows.SystemParameters]::WorkArea
-    $panel.Left = if ($cfg.corner -like '*-left') { $wa.Left + $cfg.marginX }
-                  else { $wa.Right - $panel.ActualWidth - $cfg.marginX }
-    $panel.Top = if ($cfg.corner -like 'bottom-*') { $window.Top - $panel.ActualHeight - 8 }
-                 else { $window.Top + $window.ActualHeight + 8 }
+    # align with the overlay, clamped to the work area; open below if there
+    # is room, otherwise above
+    $panel.Left = [Math]::Max($wa.Left, [Math]::Min($window.Left, $wa.Right - $panel.ActualWidth))
+    $panel.Top = if ($window.Top + $window.ActualHeight + 8 + $panel.ActualHeight -le $wa.Bottom) {
+                     $window.Top + $window.ActualHeight + 8
+                 } else { $window.Top - $panel.ActualHeight - 8 }
 }
 function Toggle-Panel {
     if ($script:panelOpen) {
@@ -401,6 +460,7 @@ function Render {
         @{ key = 'claude';   name = 'CLAUDE'; fetch = ${function:Get-ClaudeUsage};   due = $remoteDue },
         @{ key = 'codex';    name = 'CODEX '; fetch = ${function:Get-CodexUsage};    due = $true },
         @{ key = 'cursor';   name = 'CURSOR'; fetch = ${function:Get-CursorUsage};   due = $remoteDue },
+        @{ key = 'copilot';  name = 'COPILT'; fetch = ${function:Get-CopilotUsage};  due = $remoteDue },
         @{ key = 'opencode'; name = 'OPENCD'; fetch = ${function:Get-OpenCodeUsage}; due = $true }
     )
 
@@ -454,20 +514,66 @@ function Render {
 
 function Set-Position {
     $wa = [System.Windows.SystemParameters]::WorkArea
-    $window.Left = if ($cfg.corner -like '*-left') { $wa.Left + $cfg.marginX }
-                   else { $wa.Right - $window.ActualWidth - $cfg.marginX }
-    $window.Top = if ($cfg.corner -like 'bottom-*') { $wa.Bottom - $window.ActualHeight - $cfg.marginY }
-                  else { $wa.Top + $cfg.marginY }
-    # "?" button (30px hit area) sits beside the overlay's top row, on the
-    # side that faces the middle of the screen
-    $btnWindow.Left = if ($cfg.corner -like '*-left') { $window.Left + $window.ActualWidth + 4 }
-                      else { $window.Left - 34 }
+    # a dragged position (saved as x/y in config.json) wins over the corner
+    if ($cfg.ContainsKey('x') -and $cfg.ContainsKey('y')) {
+        $window.Left = [double]$cfg.x
+        $window.Top = [double]$cfg.y
+    } else {
+        $window.Left = if ($cfg.corner -like '*-left') { $wa.Left + $cfg.marginX }
+                       else { $wa.Right - $window.ActualWidth - $cfg.marginX }
+        $window.Top = if ($cfg.corner -like 'bottom-*') { $wa.Bottom - $window.ActualHeight - $cfg.marginY }
+                      else { $wa.Top + $cfg.marginY }
+    }
+    # "?" button (30px hit area) sits beside the overlay's top row, on
+    # whichever side has room
+    $btnWindow.Left = if ($window.Left - 34 -ge $wa.Left) { $window.Left - 34 }
+                      else { $window.Left + $window.ActualWidth + 4 }
     $btnWindow.Top = $window.Top - 4
     if ($script:panelOpen) { Set-PanelPosition }
 }
 
+# Persist the current window position into config.json, keeping any other
+# keys the user has set there.
+function Save-Config {
+    $obj = [ordered]@{}
+    if (Test-Path $cfgFile) {
+        try {
+            (Get-Content $cfgFile -Raw | ConvertFrom-Json).PSObject.Properties |
+                ForEach-Object { $obj[$_.Name] = $_.Value }
+        } catch {}
+    }
+    $obj['x'] = $cfg.x
+    $obj['y'] = $cfg.y
+    try { $obj | ConvertTo-Json | Set-Content -Path $cfgFile -Encoding utf8 } catch {}
+}
+
 $window.Add_ContentRendered({ Set-Position })
 $window.Add_SizeChanged({ Set-Position })
+
+# Ctrl+drag to move: while Ctrl is held the overlay stops being
+# click-through so it can catch the mouse; releasing Ctrl restores it.
+$script:interactive = $false
+$ctrlTimer = New-Object System.Windows.Threading.DispatcherTimer
+$ctrlTimer.Interval = [TimeSpan]::FromMilliseconds(150)
+$ctrlTimer.Add_Tick({
+    $ctrlDown = ([Win32Ex]::GetAsyncKeyState(0x11) -band 0x8000) -ne 0
+    if ($ctrlDown -ne $script:interactive) {
+        $script:interactive = $ctrlDown
+        Set-ClickThrough $window (-not $ctrlDown)
+        $window.Cursor = if ($ctrlDown) { [System.Windows.Input.Cursors]::SizeAll } else { $null }
+    }
+})
+$ctrlTimer.Start()
+
+$window.Add_MouseLeftButtonDown({
+    if (-not $script:interactive) { return }
+    try { $window.DragMove() } catch {}
+    # remember where it was dropped, across restarts
+    $cfg['x'] = [Math]::Round($window.Left)
+    $cfg['y'] = [Math]::Round($window.Top)
+    Save-Config
+    Set-Position
+})
 
 $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromSeconds($cfg.refreshSeconds)
@@ -488,5 +594,23 @@ Set-Position
 $app = New-Object System.Windows.Application
 $app.ShutdownMode = [System.Windows.ShutdownMode]::OnExplicitShutdown
 $window.Add_Closed({ $app.Shutdown() })
+
+# ---------- tray icon ----------
+
+Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+$notify = New-Object System.Windows.Forms.NotifyIcon
+$notify.Icon = [System.Drawing.SystemIcons]::Information
+$notify.Text = 'usage overlay'
+$notify.Visible = $true
+$trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$null = $trayMenu.Items.Add('Refresh now', $null, { try { Render } catch {} })
+$null = $trayMenu.Items.Add('Restart', $null, {
+    Start-Process powershell -ArgumentList '-WindowStyle', 'Hidden', '-File', (Join-Path $dir 'usage-overlay.ps1') -WindowStyle Hidden
+})
+$null = $trayMenu.Items.Add('Exit', $null, { $app.Shutdown() })
+$notify.ContextMenuStrip = $trayMenu
+
 $app.Run() | Out-Null
+$notify.Visible = $false
+$notify.Dispose()
 Remove-Item $pidFile -ErrorAction SilentlyContinue
