@@ -54,25 +54,8 @@ try { $cfg.refreshSeconds = [Math]::Max(15, [int]$cfg.refreshSeconds) } catch { 
 try { $cfg.marginX = [double]$cfg.marginX } catch { $cfg.marginX = 14 }
 try { $cfg.marginY = [double]$cfg.marginY } catch { $cfg.marginY = 14 }
 
-# With "auto", a section is kept only if its tool left data on this machine,
-# so tools you don't use don't show up as permanent errors.
-$hasCopilotConfig = ("$($cfg.githubToken)" -ne '' -and "$($cfg.githubUser)" -ne '')
-$detected = [ordered]@{
-    claude   = (Test-Path "$env:USERPROFILE\.claude\.credentials.json")
-    codex    = (Test-Path "$env:USERPROFILE\.codex\sessions")
-    cursor   = (Test-Path "$env:APPDATA\Cursor\User\globalStorage\state.vscdb")
-    copilot  = $hasCopilotConfig
-    opencode = (Test-Path "$env:USERPROFILE\.local\share\opencode\opencode.db")
-}
-if ("$($cfg.sections)" -eq 'auto') {
-    $enabledSections = @($detected.Keys | Where-Object { $detected[$_] })
-    # nothing detected at all: show everything except copilot, which needs
-    # a token nobody has typed in yet and would otherwise show a permanent
-    # error with no local trace of the tool to justify it
-    if (-not $enabledSections) { $enabledSections = @($detected.Keys | Where-Object { $_ -ne 'copilot' }) }
-} else {
-    $enabledSections = @($cfg.sections | ForEach-Object { "$_".ToLower() })
-}
+# Which sections to show is decided from the provider registry further down
+# (each provider knows how to detect itself); see $providers / $enabledProviders.
 
 # ---------- data ----------
 
@@ -208,6 +191,41 @@ function Get-OpenCodeUsage {
     } catch {
         return @{ ok = $false; err = 'read failed' }
     }
+}
+
+# ---------- provider registry ----------
+
+# One row per source. Adding a provider is one entry here, nothing else:
+#   key      stable id, also the config.json "sections" name and cache key
+#   name     6-char label drawn in the overlay
+#   remote   $true = hits a rate-limited network API (fetched every 3rd tick),
+#            $false = cheap local read (fetched every tick)
+#   detect   scriptblock, $true when this tool has usable data/config here
+#   autoHide $true = never shown by the "nothing detected" fallback (needs
+#            explicit config, e.g. a token, so it can't just appear)
+#   fn       name of the fetch function, invoked by name in a background runspace
+$providers = @(
+    @{ key = 'claude';   name = 'CLAUDE'; remote = $true;  fn = 'Get-ClaudeUsage'
+       detect = { Test-Path "$env:USERPROFILE\.claude\.credentials.json" } }
+    @{ key = 'codex';    name = 'CODEX '; remote = $false; fn = 'Get-CodexUsage'
+       detect = { Test-Path "$env:USERPROFILE\.codex\sessions" } }
+    @{ key = 'cursor';   name = 'CURSOR'; remote = $true;  fn = 'Get-CursorUsage'
+       detect = { Test-Path "$env:APPDATA\Cursor\User\globalStorage\state.vscdb" } }
+    @{ key = 'copilot';  name = 'COPILT'; remote = $true;  fn = 'Get-CopilotUsage'; autoHide = $true
+       detect = { "$($cfg.githubToken)" -ne '' -and "$($cfg.githubUser)" -ne '' } }
+    @{ key = 'opencode'; name = 'OPENCD'; remote = $false; fn = 'Get-OpenCodeUsage'
+       detect = { Test-Path "$env:USERPROFILE\.local\share\opencode\opencode.db" } }
+)
+
+# Resolve the enabled providers once, in registry order.
+if ("$($cfg.sections)" -eq 'auto') {
+    $enabledProviders = @($providers | Where-Object { & $_.detect })
+    # nothing detected at all: fall back to everything that can run without
+    # extra config (so an unconfigured Copilot never shows a permanent error)
+    if (-not $enabledProviders) { $enabledProviders = @($providers | Where-Object { -not $_.autoHide }) }
+} else {
+    $wanted = @($cfg.sections | ForEach-Object { "$_".ToLower() })
+    $enabledProviders = @($providers | Where-Object { $wanted -contains $_.key })
 }
 
 # ---------- rendering helpers ----------
@@ -433,78 +451,116 @@ if (Test-Path $cacheFile) {
     } catch {}
 }
 
-# Fetch when due; otherwise (or on failure) fall back to the last good
-# result, flagged stale so the UI can mark it with *.
-function Update-Source([string]$key, [scriptblock]$fetch, [bool]$due) {
-    if ($due -or -not $script:lastGood.ContainsKey($key)) {
-        $d = & $fetch
-        if ($d.ok) {
-            $d.stale = $false
-            $script:lastGood[$key] = $d
-            return $d
-        }
-        if ($script:lastGood.ContainsKey($key)) {
-            $c = $script:lastGood[$key]
-            $c.stale = $true
-            return $c
-        }
-        return $d
+# ---------- background fetching ----------
+#
+# Fetches (HTTP calls, node.exe spawns) used to run on the UI thread, freezing
+# the overlay for up to ~8s per API on a bad network. They now run in a
+# background runspace pool; only the fast redraw touches WPF. Shared state
+# ($lastGood, $inflight) is read/written solely from DispatcherTimer ticks,
+# which run on the UI thread, so no locking is needed.
+
+$iss = [System.Management.Automation.Runspaces.InitialSessionState]::CreateDefault()
+foreach ($v in @{ dir = $dir; nodeExe = $nodeExe; cfg = $cfg }.GetEnumerator()) {
+    $iss.Variables.Add((New-Object System.Management.Automation.Runspaces.SessionStateVariableEntry $v.Key, $v.Value, ''))
+}
+foreach ($fnName in 'Get-HttpErrLabel', 'Get-ClaudeUsage', 'Get-CodexUsage', 'Get-CursorUsage', 'Get-CopilotUsage', 'Get-OpenCodeUsage') {
+    $iss.Commands.Add((New-Object System.Management.Automation.Runspaces.SessionStateFunctionEntry $fnName, (Get-Command $fnName).Definition))
+}
+$pool = [runspacefactory]::CreateRunspacePool(1, 4, $iss, $Host)
+$pool.Open()
+$script:inflight = @{}   # key -> @{ ps; handle }
+
+# Merge one finished fetch into $lastGood, keeping the last good value on
+# failure (flagged stale so the UI marks it amber).
+function Merge-Result([string]$key, $d) {
+    if ($null -ne $d -and $d.ok) {
+        $d.stale = $false
+        $script:lastGood[$key] = $d
+    } elseif ($script:lastGood.ContainsKey($key)) {
+        $script:lastGood[$key].stale = $true
+    } elseif ($null -ne $d) {
+        $script:lastGood[$key] = $d   # first fetch failed, nothing cached yet
     }
-    return $script:lastGood[$key]
 }
 
-function Render {
-    $script:tick++
-    # Codex is a local file read: every tick. Claude and Cursor hit remote
-    # APIs that rate-limit: every 3rd tick (3 min).
-    $remoteDue = ($script:tick % 3 -eq 0)
-    $specs = @(
-        @{ key = 'claude';   name = 'CLAUDE'; fetch = ${function:Get-ClaudeUsage};   due = $remoteDue },
-        @{ key = 'codex';    name = 'CODEX '; fetch = ${function:Get-CodexUsage};    due = $true },
-        @{ key = 'cursor';   name = 'CURSOR'; fetch = ${function:Get-CursorUsage};   due = $remoteDue },
-        @{ key = 'copilot';  name = 'COPILT'; fetch = ${function:Get-CopilotUsage};  due = $remoteDue },
-        @{ key = 'opencode'; name = 'OPENCD'; fetch = ${function:Get-OpenCodeUsage}; due = $true }
-    )
-
-    $body.Inlines.Clear()
-    $sections = @()
-    foreach ($spec in $specs) {
-        if ($enabledSections -contains $spec.key) {
-            $sections += @{ name = $spec.name; data = (Update-Source $spec.key $spec.fetch $spec.due) }
-        }
+# Kick off background fetches for every due provider not already in flight.
+# Remote providers run only when $remoteDue; local reads run every time.
+function Start-Fetch([bool]$remoteDue) {
+    foreach ($p in $enabledProviders) {
+        $due = if ($p.remote) { $remoteDue } else { $true }
+        if (-not $due) { continue }
+        if ($script:inflight.ContainsKey($p.key)) { continue }
+        try {
+            $ps = [powershell]::Create()
+            $ps.RunspacePool = $pool
+            [void]$ps.AddCommand($p.fn)
+            $script:inflight[$p.key] = @{ ps = $ps; handle = $ps.BeginInvoke() }
+        } catch {}
     }
+}
+
+# Collect finished fetches, merge them, and redraw. Runs often and cheaply.
+$collector = New-Object System.Windows.Threading.DispatcherTimer
+$collector.Interval = [TimeSpan]::FromMilliseconds(200)
+$collector.Add_Tick({
+    $any = $false
+    foreach ($key in @($script:inflight.Keys)) {
+        $job = $script:inflight[$key]
+        if (-not $job.handle.IsCompleted) { continue }
+        $result = $null
+        try {
+            # EndInvoke returns a PSDataCollection, which is a consuming stream:
+            # index it twice and the second read is empty. Snapshot it into a
+            # plain array once, then only touch the array. The item comes back
+            # usable as a hashtable directly (no PSObject unwrap needed).
+            $outArr = @($job.ps.EndInvoke($job.handle))
+            if ($outArr.Count -gt 0) { $result = $outArr[0] }
+        } catch { $result = @{ ok = $false; err = 'offline' } }
+        try { $job.ps.Dispose() } catch {}
+        $script:inflight.Remove($key)
+        Merge-Result $key $result
+        $any = $true
+    }
+    if ($any) { Draw }
+})
+
+# Draw the overlay from whatever is currently in $lastGood (fast, UI thread).
+function Draw {
+    $body.Inlines.Clear()
     $first = $true
     $anyStale = $false
-    foreach ($s in $sections) {
+    foreach ($p in $enabledProviders) {
+        if (-not $script:lastGood.ContainsKey($p.key)) { continue }
+        $data = $script:lastGood[$p.key]
         if (-not $first) { Add-Run "`n" '#E6EDF3' }
         $first = $false
-        if (-not $s.data.ok) {
-            Add-Run ("{0}  {1}" -f $s.name, $s.data.err) '#8B949E'
+        if (-not $data.ok) {
+            Add-Run ("{0}  {1}" -f $p.name, $data.err) '#8B949E'
             continue
         }
         $nameColor = '#8B949E'
-        if ($s.data.stale) { $nameColor = '#E3B341'; $anyStale = $true }
+        if ($data.stale) { $nameColor = '#E3B341'; $anyStale = $true }
         # Text-only sections (e.g. OpenCode spend): no bar/% columns.
-        if ($s.data.textRows) {
+        if ($data.textRows) {
             $rowIdx = 0
-            foreach ($t in $s.data.textRows) {
-                $prefix = if ($rowIdx -eq 0) { $s.name } else { '      ' }
+            foreach ($t in $data.textRows) {
+                $prefix = if ($rowIdx -eq 0) { $p.name } else { '      ' }
                 Add-Run ("{0} " -f $prefix) $nameColor
                 Add-Run $t '#C9D1D9'
-                if ($rowIdx -lt $s.data.textRows.Count - 1) { Add-Run "`n" '#E6EDF3' }
+                if ($rowIdx -lt $data.textRows.Count - 1) { Add-Run "`n" '#E6EDF3' }
                 $rowIdx++
             }
             continue
         }
         $rowIdx = 0
-        foreach ($row in $s.data.rows) {
-            $prefix = if ($rowIdx -eq 0) { $s.name } else { '      ' }
+        foreach ($row in $data.rows) {
+            $prefix = if ($rowIdx -eq 0) { $p.name } else { '      ' }
             Add-Run ("{0} " -f $prefix) $nameColor
             Add-Run ($row.Label + ' ') '#8B949E'
             Add-Run (Get-Bar $row.Pct) (Get-PctColor $row.Pct)
             Add-Run (" {0,3:N0}% " -f $row.Pct) (Get-PctColor $row.Pct)
             Add-Run ("r " + (Format-Reset $row.Resets)) '#8B949E'
-            if ($rowIdx -lt $s.data.rows.Count - 1) { Add-Run "`n" '#E6EDF3' }
+            if ($rowIdx -lt $data.rows.Count - 1) { Add-Run "`n" '#E6EDF3' }
             $rowIdx++
         }
     }
@@ -512,6 +568,14 @@ function Render {
     if ($anyStale) { Add-Run ' / amber = cached' '#E3B341' }
 
     try { $script:lastGood | ConvertTo-Json -Depth 6 | Set-Content -Path $cacheFile -Encoding utf8 } catch {}
+}
+
+# One tick: start any due fetches, then redraw from current data. Results that
+# arrive later trigger their own redraw via the collector.
+function Render {
+    $script:tick++
+    Start-Fetch ($script:tick % 3 -eq 0)
+    Draw
 }
 
 function Set-Position {
@@ -598,6 +662,7 @@ $timer.Add_Tick({ try { Render } catch {} })
 $window.Add_Loaded({
     try { Render } catch {}
     $timer.Start()
+    $collector.Start()
 })
 
 Build-Panel
@@ -619,7 +684,7 @@ $notify.Icon = [System.Drawing.SystemIcons]::Information
 $notify.Text = 'usage overlay'
 $notify.Visible = $true
 $trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
-$null = $trayMenu.Items.Add('Refresh now', $null, { try { Render } catch {} })
+$null = $trayMenu.Items.Add('Refresh now', $null, { try { Start-Fetch $true; Draw } catch {} })
 $null = $trayMenu.Items.Add('Restart', $null, {
     # a single quoted string, not an array: PowerShell 5.1's Start-Process
     # joins ArgumentList array elements with spaces but does NOT quote them,
@@ -633,4 +698,5 @@ $notify.ContextMenuStrip = $trayMenu
 $app.Run() | Out-Null
 $notify.Visible = $false
 $notify.Dispose()
+try { $pool.Close(); $pool.Dispose() } catch {}
 Remove-Item $pidFile -ErrorAction SilentlyContinue
