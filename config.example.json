@@ -6,5 +6,7 @@
   "sections": "auto",
   "githubUser": "",
   "githubToken": "",
-  "copilotIncluded": 200
+  "copilotIncluded": 200,
+  "x": null,
+  "y": null
 }

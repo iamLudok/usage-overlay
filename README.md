@@ -54,7 +54,7 @@ keys keep their defaults; `config.json` is git-ignored.
 | `sections` | `"auto"` or e.g. `["claude", "codex"]` | `auto` shows only the tools with local data on this machine. |
 | `githubUser`, `githubToken` | your login, a PAT | Enables the `COPILT` section. Create a fine-grained personal access token with Account permissions -> Plan -> Read-only, nothing else. |
 | `copilotIncluded` | number, default 200 | Monthly AI credits included in your Copilot plan, used to compute the percentage (the API only reports consumption, not the limit). |
-| `x`, `y` | pixels | Auto-written when you Ctrl+drag the overlay; delete to go back to corner docking. |
+| `x`, `y` | pixels or `null` | Auto-written when you Ctrl+drag the overlay. Leave them `null` (or delete them) to dock by `corner` instead. |
 
 ## License
 

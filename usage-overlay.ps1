@@ -585,8 +585,10 @@ function Set-Position {
     # but is clamped to the current work area so a monitor change (or a
     # corrupted value) can never push the click-through overlay off-screen
     # with no way to grab it back
-    $savedX = if ($cfg.ContainsKey('x')) { try { [double]$cfg.x } catch { $null } } else { $null }
-    $savedY = if ($cfg.ContainsKey('y')) { try { [double]$cfg.y } catch { $null } } else { $null }
+    # x/y may be absent, or present-but-null (the config.example.json placeholder
+    # that shows the keys exist); either way that means "not pinned, use corner".
+    $savedX = if ($cfg.ContainsKey('x') -and $null -ne $cfg.x) { try { [double]$cfg.x } catch { $null } } else { $null }
+    $savedY = if ($cfg.ContainsKey('y') -and $null -ne $cfg.y) { try { [double]$cfg.y } catch { $null } } else { $null }
     if ($null -ne $savedX -and $null -ne $savedY) {
         $window.Left = [Math]::Max($wa.Left, [Math]::Min($savedX, $wa.Right - $window.ActualWidth))
         $window.Top = [Math]::Max($wa.Top, [Math]::Min($savedY, $wa.Bottom - $window.ActualHeight))
