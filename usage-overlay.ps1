@@ -1,7 +1,8 @@
 # usage-overlay.ps1
-# Floating click-through overlay showing Claude Code + Codex usage windows.
-# Run:  powershell -WindowStyle Hidden -File usage-overlay.ps1
-# Stop: powershell -File stop-overlay.ps1   (or kill the PID in usage-overlay.pid)
+# Floating click-through overlay showing coding-agent usage across Claude,
+# Codex, Cursor, Copilot and OpenCode.
+# Run:  powershell -WindowStyle Hidden -File usage-overlay.ps1  (or start-overlay.vbs)
+# Stop: powershell -File stop-overlay.ps1   (or the tray icon's Exit)
 
 $ErrorActionPreference = 'Stop'
 Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase
