@@ -125,7 +125,7 @@ function Get-CodexUsage {
 function Get-CursorUsage {
     try {
         if (-not $nodeExe) { return @{ ok = $false; err = 'node missing' } }
-        $json = & $nodeExe (Join-Path $dir 'cursor-usage.js')
+        $json = & $nodeExe (Join-Path $dir 'sqlite-usage.js') cursor
         if (-not $json) { return @{ ok = $false; err = 'no data' } }
         $j = $json | ConvertFrom-Json
         if ($j.error) { return @{ ok = $false; err = 'fetch failed' } }
@@ -180,7 +180,7 @@ function Get-OpenCodeUsage {
     # tracked spend instead of a % bar (rendered as a plain text line).
     try {
         if (-not $nodeExe) { return @{ ok = $false; err = 'node missing' } }
-        $json = & $nodeExe (Join-Path $dir 'opencode-usage.js')
+        $json = & $nodeExe (Join-Path $dir 'sqlite-usage.js') opencode
         if (-not $json) { return @{ ok = $false; err = 'no data' } }
         $j = $json | ConvertFrom-Json
         if ($j.error) { return @{ ok = $false; err = 'read failed' } }
