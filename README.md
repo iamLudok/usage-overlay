@@ -27,8 +27,12 @@ powershell -WindowStyle Hidden -File usage-overlay.ps1
 powershell -File stop-overlay.ps1
 ```
 
-Or use the tray icon (next to the clock): right-click it for Refresh now,
-Restart, and Exit.
+Or double-click `start-overlay.vbs` to start it with no terminal window at
+all (Windows 11's default terminal ignores `-WindowStyle Hidden`, so running
+the `.ps1` directly leaves a stray window; the `.vbs` launcher does not).
+
+Once running, use the tray icon (next to the clock): right-click it for
+Refresh now, Restart, and Exit.
 
 ## Moving the overlay
 

@@ -679,11 +679,65 @@ $window.Add_Closed({ $app.Shutdown() })
 # ---------- tray icon ----------
 
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
+
+# Custom renderer so the tray menu matches the overlay: dark background, light
+# text always (so the hovered item stays readable), subtle gray highlight.
+Add-Type -ReferencedAssemblies System.Windows.Forms, System.Drawing -TypeDefinition @"
+using System.Drawing;
+using System.Windows.Forms;
+public class DarkMenuRenderer : ToolStripProfessionalRenderer {
+    static Color Bg    = Color.FromArgb(13, 17, 23);
+    static Color Hover = Color.FromArgb(48, 54, 61);
+    static Color Text  = Color.FromArgb(201, 209, 217);
+    static Color Line  = Color.FromArgb(60, 66, 74);
+    public DarkMenuRenderer() : base(new DarkColors()) { }
+    protected override void OnRenderMenuItemBackground(ToolStripItemRenderEventArgs e) {
+        Rectangle r = new Rectangle(Point.Empty, e.Item.Size);
+        using (SolidBrush b = new SolidBrush(e.Item.Selected ? Hover : Bg)) e.Graphics.FillRectangle(b, r);
+    }
+    protected override void OnRenderItemText(ToolStripItemTextRenderEventArgs e) {
+        e.TextColor = Text;   // always light, so the highlighted row stays legible
+        base.OnRenderItemText(e);
+    }
+    protected override void OnRenderToolStripBackground(ToolStripRenderEventArgs e) {
+        using (SolidBrush b = new SolidBrush(Bg)) e.Graphics.FillRectangle(b, e.AffectedBounds);
+    }
+    protected override void OnRenderToolStripBorder(ToolStripRenderEventArgs e) {
+        Rectangle r = e.AffectedBounds; r.Width--; r.Height--;
+        using (Pen p = new Pen(Line)) e.Graphics.DrawRectangle(p, r);
+    }
+}
+public class DarkColors : ProfessionalColorTable {
+    public override Color ToolStripDropDownBackground { get { return Color.FromArgb(13, 17, 23); } }
+}
+"@
+
 $notify = New-Object System.Windows.Forms.NotifyIcon
-$notify.Icon = [System.Drawing.SystemIcons]::Information
+# A small usage-meter icon (green/amber/red bars) instead of the generic "i".
+$script:trayBmp = New-Object System.Drawing.Bitmap 32, 32
+$g = [System.Drawing.Graphics]::FromImage($script:trayBmp)
+$g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+$g.Clear([System.Drawing.Color]::Transparent)
+$bars = @(
+    @{ x = 4;  h = 11; c = [System.Drawing.Color]::FromArgb(126, 231, 135) },  # green
+    @{ x = 13; h = 17; c = [System.Drawing.Color]::FromArgb(227, 179, 65) },   # amber
+    @{ x = 22; h = 24; c = [System.Drawing.Color]::FromArgb(255, 123, 114) }   # red
+)
+foreach ($b in $bars) {
+    $brush = New-Object System.Drawing.SolidBrush $b.c
+    $g.FillRectangle($brush, [int]$b.x, [int](28 - $b.h), 6, [int]$b.h)
+    $brush.Dispose()
+}
+$g.Dispose()
+$script:trayIcon = [System.Drawing.Icon]::FromHandle($script:trayBmp.GetHicon())
+$notify.Icon = $script:trayIcon
 $notify.Text = 'usage overlay'
 $notify.Visible = $true
 $trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
+$trayMenu.Renderer = New-Object DarkMenuRenderer
+$trayMenu.ShowImageMargin = $false   # drop the empty icon gutter on the left
+$trayMenu.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+$trayMenu.ForeColor = [System.Drawing.Color]::FromArgb(201, 209, 217)
 $null = $trayMenu.Items.Add('Refresh now', $null, { try { Start-Fetch $true; Draw } catch {} })
 $null = $trayMenu.Items.Add('Restart', $null, {
     # a single quoted string, not an array: PowerShell 5.1's Start-Process
@@ -693,6 +747,10 @@ $null = $trayMenu.Items.Add('Restart', $null, {
     Start-Process powershell -ArgumentList "-WindowStyle Hidden -File `"$scriptPath`"" -WindowStyle Hidden
 })
 $null = $trayMenu.Items.Add('Exit', $null, { $app.Shutdown() })
+foreach ($it in $trayMenu.Items) {
+    $it.ForeColor = [System.Drawing.Color]::FromArgb(201, 209, 217)
+    $it.Padding = New-Object System.Windows.Forms.Padding(4, 2, 12, 2)
+}
 $notify.ContextMenuStrip = $trayMenu
 
 $app.Run() | Out-Null
