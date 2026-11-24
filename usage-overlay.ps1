@@ -32,6 +32,8 @@ if (-not $nodeExe -and (Test-Path 'C:\Program Files\nodejs\node.exe')) {
 # "sections": "auto" shows only the tools with local data on this machine,
 # or list them explicitly, e.g. ["claude", "codex"].
 $cfg = @{
+    mode            = 'overlay'     # overlay (floating box) | taskbar (compact strip in the taskbar)
+    taskbarOffset   = 12            # taskbar mode: gap from the taskbar edge, in px
     corner          = 'top-right'   # top-right | top-left | bottom-right | bottom-left
     marginX         = 14
     marginY         = 14
@@ -54,6 +56,8 @@ if ($cfg.corner -notin @('top-right', 'top-left', 'bottom-right', 'bottom-left')
 try { $cfg.refreshSeconds = [Math]::Max(15, [int]$cfg.refreshSeconds) } catch { $cfg.refreshSeconds = 60 }
 try { $cfg.marginX = [double]$cfg.marginX } catch { $cfg.marginX = 14 }
 try { $cfg.marginY = [double]$cfg.marginY } catch { $cfg.marginY = 14 }
+try { $cfg.taskbarOffset = [double]$cfg.taskbarOffset } catch { $cfg.taskbarOffset = 12 }
+$taskbarMode = ("$($cfg.mode)".ToLower() -eq 'taskbar')
 
 # Which sections to show is decided from the provider registry further down
 # (each provider knows how to detect itself); see $providers / $enabledProviders.
@@ -205,17 +209,29 @@ function Get-OpenCodeUsage {
 #   autoHide $true = never shown by the "nothing detected" fallback (needs
 #            explicit config, e.g. a token, so it can't just appear)
 #   fn       name of the fetch function, invoked by name in a background runspace
+# Local tools count as detected only if used in the last 30 days, so a tool
+# tried once months ago (its files still on disk) doesn't keep a dead section.
+function Test-UsedRecently([string]$path, [string]$filter = '') {
+    if (-not (Test-Path $path)) { return $false }
+    $since = (Get-Date).AddDays(-30)
+    if ($filter) {
+        return [bool](Get-ChildItem $path -Recurse -File -Filter $filter -ErrorAction SilentlyContinue |
+            Where-Object { $_.LastWriteTime -gt $since } | Select-Object -First 1)
+    }
+    return (Get-Item $path).LastWriteTime -gt $since
+}
+
 $providers = @(
     @{ key = 'claude';   name = 'CLAUDE'; remote = $true;  fn = 'Get-ClaudeUsage'
        detect = { Test-Path "$env:USERPROFILE\.claude\.credentials.json" } }
     @{ key = 'codex';    name = 'CODEX '; remote = $false; fn = 'Get-CodexUsage'
-       detect = { Test-Path "$env:USERPROFILE\.codex\sessions" } }
+       detect = { Test-UsedRecently "$env:USERPROFILE\.codex\sessions" 'rollout-*.jsonl' } }
     @{ key = 'cursor';   name = 'CURSOR'; remote = $true;  fn = 'Get-CursorUsage'
-       detect = { Test-Path "$env:APPDATA\Cursor\User\globalStorage\state.vscdb" } }
+       detect = { Test-UsedRecently "$env:APPDATA\Cursor\User\globalStorage\state.vscdb" } }
     @{ key = 'copilot';  name = 'COPILT'; remote = $true;  fn = 'Get-CopilotUsage'; autoHide = $true
        detect = { "$($cfg.githubToken)" -ne '' -and "$($cfg.githubUser)" -ne '' } }
     @{ key = 'opencode'; name = 'OPENCD'; remote = $false; fn = 'Get-OpenCodeUsage'
-       detect = { Test-Path "$env:USERPROFILE\.local\share\opencode\opencode.db" } }
+       detect = { Test-UsedRecently "$env:USERPROFILE\.local\share\opencode\opencode.db" } }
 )
 
 # Resolve the enabled providers once, in registry order.
@@ -308,6 +324,25 @@ $panel = New-XamlWindow @'
 '@
 $panelBody = $panel.FindName('PanelBody')
 
+# Taskbar mode: a compact strip (glyph + "pct/reset" per row) drawn on top of
+# the empty left part of the Windows 11 taskbar. Windows 11 has no API for
+# third-party taskbar bands, so this is a topmost window kept aligned to the
+# taskbar. Right click opens the tray menu.
+$tbWin = New-XamlWindow @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        WindowStyle="None" AllowsTransparency="True" Background="Transparent"
+        Topmost="True" ShowInTaskbar="False" SizeToContent="Width" Height="48"
+        ShowActivated="False" ResizeMode="NoResize">
+  <Border x:Name="TbBorder" Background="#01808080" CornerRadius="4"
+          Padding="4,0,4,0" Margin="0,4,0,4">
+    <StackPanel x:Name="Strip" Orientation="Horizontal" VerticalAlignment="Center"/>
+  </Border>
+</Window>
+'@
+$tbBorder = $tbWin.FindName('TbBorder')
+$strip = $tbWin.FindName('Strip')
+
 # Click-through / no-activate / no-alt-tab styling.
 Add-Type @"
 using System;
@@ -316,6 +351,54 @@ public static class Win32Ex {
     [DllImport("user32.dll")] public static extern int GetWindowLong(IntPtr hWnd, int nIndex);
     [DllImport("user32.dll")] public static extern int SetWindowLong(IntPtr hWnd, int nIndex, int dwNewLong);
     [DllImport("user32.dll")] public static extern short GetAsyncKeyState(int vKey);
+    [DllImport("user32.dll")] public static extern bool RegisterHotKey(IntPtr hWnd, int id, uint fsModifiers, uint vk);
+    [DllImport("user32.dll")] public static extern bool UnregisterHotKey(IntPtr hWnd, int id);
+
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+    [StructLayout(LayoutKind.Sequential)] public struct MONITORINFO { public int cbSize; public RECT rcMonitor, rcWork; public uint dwFlags; }
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindow(string cls, string title);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string title);
+    [DllImport("user32.dll")] static extern bool GetWindowRect(IntPtr hWnd, out RECT r);
+    [DllImport("user32.dll")] static extern IntPtr GetForegroundWindow();
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)] static extern int GetClassName(IntPtr hWnd, System.Text.StringBuilder sb, int max);
+    [DllImport("user32.dll")] static extern IntPtr MonitorFromWindow(IntPtr hWnd, uint flags);
+    [DllImport("user32.dll")] static extern bool GetMonitorInfo(IntPtr mon, ref MONITORINFO mi);
+    [DllImport("user32.dll")] static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+
+    // Primary taskbar rect in device pixels, or null when there is none.
+    public static int[] TaskbarRect() {
+        RECT r; IntPtr h = FindWindow("Shell_TrayWnd", null);
+        if (h == IntPtr.Zero || !GetWindowRect(h, out r)) return null;
+        return new int[] { r.Left, r.Top, r.Right, r.Bottom };
+    }
+    // Notification area (clock + tray icons), to sit left of it when the
+    // taskbar icons are left-aligned.
+    public static int[] TrayRect() {
+        RECT r; IntPtr h = FindWindow("Shell_TrayWnd", null);
+        IntPtr t = h == IntPtr.Zero ? IntPtr.Zero : FindWindowEx(h, IntPtr.Zero, "TrayNotifyWnd", null);
+        if (t == IntPtr.Zero || !GetWindowRect(t, out r)) return null;
+        return new int[] { r.Left, r.Top, r.Right, r.Bottom };
+    }
+    // True when the foreground window covers its whole monitor (a video,
+    // a game, a presentation): the taskbar is hidden then, and so are we.
+    public static bool ForegroundIsFullscreen() {
+        IntPtr fg = GetForegroundWindow();
+        if (fg == IntPtr.Zero) return false;
+        var sb = new System.Text.StringBuilder(64);
+        GetClassName(fg, sb, 64);
+        string c = sb.ToString();
+        if (c == "Progman" || c == "WorkerW" || c == "Shell_TrayWnd") return false;
+        RECT r; if (!GetWindowRect(fg, out r)) return false;
+        var mi = new MONITORINFO(); mi.cbSize = Marshal.SizeOf(typeof(MONITORINFO));
+        if (!GetMonitorInfo(MonitorFromWindow(fg, 2), ref mi)) return false;
+        return r.Left <= mi.rcMonitor.Left && r.Top <= mi.rcMonitor.Top &&
+               r.Right >= mi.rcMonitor.Right && r.Bottom >= mi.rcMonitor.Bottom;
+    }
+    // Clicking the taskbar raises it over every topmost window, so we push
+    // ourselves back on top without moving, resizing or activating.
+    public static void BringToTop(IntPtr hWnd) {
+        SetWindowPos(hWnd, new IntPtr(-1), 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0010);
+    }
 }
 "@
 $GWL_EXSTYLE = -20
@@ -339,8 +422,49 @@ function Set-ClickThrough($win, [bool]$on) {
     [Win32Ex]::SetWindowLong($hwnd, $GWL_EXSTYLE, $ex) | Out-Null
 }
 
+$MOD_CONTROL = 0x0002
+$MOD_ALT     = 0x0001
+$VK_U        = 0x55
+$HOTKEY_ID   = 9001
+
+# Ctrl+Alt+U shows/hides the overlay, the "?" button, and closes the help
+# panel if it was open. Background fetching keeps running while hidden, so
+# the numbers are current the moment it reappears.
+$script:overlayVisible = $true
+$script:stripHidden = $false
+function Toggle-Overlay {
+    if ($taskbarMode) {
+        # taskbar mode has no floating box: the hotkey/tray item hide the strip
+        $script:stripHidden = -not $script:stripHidden
+        Set-TaskbarPosition
+        return
+    }
+    if ($script:overlayVisible) {
+        $window.Hide()
+        $btnWindow.Hide()
+        if ($script:panelOpen) { Toggle-Panel }
+        $script:overlayVisible = $false
+    } else {
+        $window.Show()
+        $btnWindow.Show()
+        Set-Position
+        $script:overlayVisible = $true
+    }
+}
+
 $window.Add_SourceInitialized({
     Set-ExStyle $window ($WS_EX_TRANSPARENT -bor $WS_EX_LAYERED -bor $WS_EX_TOOLWINDOW -bor $WS_EX_NOACTIVATE)
+    $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper($window)).Handle
+    [void][Win32Ex]::RegisterHotKey($hwnd, $HOTKEY_ID, $MOD_CONTROL -bor $MOD_ALT, $VK_U)
+    $source = [System.Windows.Interop.HwndSource]::FromHwnd($hwnd)
+    $source.AddHook({
+        param($hwnd, $msg, $wParam, $lParam, [ref]$handled)
+        if ($msg -eq 0x0312 -and $wParam.ToInt32() -eq $HOTKEY_ID) {   # WM_HOTKEY
+            try { Toggle-Overlay } catch {}
+            $handled.Value = $true
+        }
+        return [IntPtr]::Zero
+    }) | Out-Null
 })
 $btnWindow.Add_SourceInitialized({
     # clickable, so NOT transparent
@@ -348,6 +472,9 @@ $btnWindow.Add_SourceInitialized({
 })
 $panel.Add_SourceInitialized({
     Set-ExStyle $panel ($WS_EX_LAYERED -bor $WS_EX_TOOLWINDOW -bor $WS_EX_NOACTIVATE)
+})
+$tbWin.Add_SourceInitialized({
+    Set-ExStyle $tbWin ($WS_EX_LAYERED -bor $WS_EX_TOOLWINDOW -bor $WS_EX_NOACTIVATE)
 })
 
 function Add-Run([string]$text, [string]$color) {
@@ -382,7 +509,8 @@ function Build-Panel {
     Add-Panel "BAR, RESET & MOVE`n" $H $true
     Add-Panel "  ##---- = 10 cells, ~10% each   " $M
     Add-Panel "r 3h / 45m / now" $T; Add-Panel " = time to reset`n" $M
-    Add-Panel "  Ctrl+drag to move (position saved)   tray icon: refresh, restart, exit`n`n" $M
+    Add-Panel "  Ctrl+drag to move (position saved)   " $M
+    Add-Panel "Ctrl+Alt+U" $T; Add-Panel " show/hide`n`n" $M
 
     Add-Panel "REFRESH`n" $H $true
     Add-Panel "  every $($cfg.refreshSeconds)s; " $M
@@ -569,6 +697,159 @@ function Draw {
     if ($anyStale) { Add-Run ' / amber = cached' '#E3B341' }
 
     try { $script:lastGood | ConvertTo-Json -Depth 6 | Set-Content -Path $cacheFile -Encoding utf8 } catch {}
+    try { Draw-Taskbar } catch {}
+}
+
+# ---------- taskbar strip ----------
+
+# Same hand-drawn 8x8 glyphs and accents as the GNOME port (linux/.../icons.js
+# and render.js), so both platforms look alike.
+$glyphs = @{
+    claude   = '...##...', '...##...', '.#.##.#.', '..#..#..', '########', '..#..#..', '.#.##.#.', '...##...'
+    codex    = '..####..', '.#....#.', '#..##..#', '#.#..#.#', '#.#..#.#', '#..##..#', '.#....#.', '..####..'
+    cursor   = '#.......', '##......', '#.#.....', '#..#....', '#...#...', '#..###..', '#.#..#..', '##....#.'
+    copilot  = '.######.', '#.#..#.#', '#......#', '#.####.#', '#.####.#', '#......#', '#.#..#.#', '.######.'
+    opencode = '........', '#.......', '##......', '###.....', '##......', '#.......', '........', '.#####..'
+}
+$glyphFallback = '........', '.######.', '.#....#.', '.#....#.', '.#....#.', '.#....#.', '.######.', '........'
+$accent = @{ claude = '#D97757'; codex = '#10A37F'; cursor = '#6C7CFF'; copilot = '#8957E5'; opencode = '#F2C744' }
+
+# The taskbar follows the *system* theme (not the apps one). Dark keeps the
+# overlay's palette; light swaps in darker shades that stay readable on the
+# pale taskbar.
+function Get-TaskbarPalette {
+    $light = $false
+    try {
+        $v = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize' -ErrorAction Stop).SystemUsesLightTheme
+        $light = ($v -eq 1)
+    } catch {}
+    if ($light) {
+        return @{ light = $true; green = '#1A7F37'; amber = '#9A6700'; red = '#CF222E'; muted = '#59636E'
+                  text = '#1F2328'; hover = '#14000000'; opencode = '#B08800' }
+    }
+    return @{ light = $false; green = '#7EE787'; amber = '#E3B341'; red = '#FF7B72'; muted = '#8B949E'
+              text = '#C9D1D9'; hover = '#1FFFFFFF'; opencode = '#F2C744' }
+}
+
+function New-Brush([string]$hex) {
+    New-Object System.Windows.Media.SolidColorBrush ([System.Windows.Media.ColorConverter]::ConvertFromString($hex))
+}
+
+function New-Glyph([string]$key, [string]$color) {
+    $grid = if ($glyphs.ContainsKey($key)) { $glyphs[$key] } else { $glyphFallback }
+    $geo = New-Object System.Windows.Media.GeometryGroup
+    $geo.FillRule = [System.Windows.Media.FillRule]::Nonzero
+    for ($y = 0; $y -lt 8; $y++) {
+        for ($x = 0; $x -lt 8; $x++) {
+            if ($grid[$y][$x] -eq '#') {
+                $geo.Children.Add((New-Object System.Windows.Media.RectangleGeometry (New-Object System.Windows.Rect $x, $y, 1, 1)))
+            }
+        }
+    }
+    # an invisible corner pixel pins the drawing to the full 8x8 box, so a
+    # glyph with empty edges is not stretched to fill the image
+    $box = New-Object System.Windows.Media.RectangleGeometry (New-Object System.Windows.Rect 0, 0, 8, 8)
+    $dg = New-Object System.Windows.Media.DrawingGroup
+    foreach ($pair in @(@([System.Windows.Media.Brushes]::Transparent, $box), @((New-Brush $color), $geo))) {
+        $gd = New-Object System.Windows.Media.GeometryDrawing
+        $gd.Brush = $pair[0]; $gd.Geometry = $pair[1]
+        $dg.Children.Add($gd)
+    }
+    $img = New-Object System.Windows.Controls.Image
+    $img.Source = New-Object System.Windows.Media.DrawingImage $dg
+    $img.Width = 16; $img.Height = 16
+    $img.VerticalAlignment = 'Center'
+    $img.Margin = New-Object System.Windows.Thickness 0, 0, 6, 0
+    [System.Windows.Media.RenderOptions]::SetEdgeMode($img, [System.Windows.Media.EdgeMode]::Aliased)
+    return $img
+}
+
+# One "pct/reset" line per row, at most two so they stack inside the 48px
+# taskbar (the detail overlay, one click away, has every row). Mirrors
+# panelRows() in the GNOME port.
+function Get-TaskbarLines($data, $pal) {
+    if (-not $data -or -not $data.ok) { return , @(@{ text = '--'; color = $pal.muted }) }
+    if ($data.textRows) {
+        $c = if ($data.stale) { $pal.amber } else { $pal.text }
+        return , @(@{ text = (@($data.textRows)[0] -replace '^mo ', ''); color = $c })
+    }
+    $rows = @($data.rows)
+    if ($rows.Count -eq 0) { return , @(@{ text = '--'; color = $pal.muted }) }
+    $out = @()
+    foreach ($row in ($rows | Select-Object -First 2)) {
+        $pct = [double]$row.Pct
+        $c = if ($data.stale) { $pal.amber } elseif ($pct -ge 85) { $pal.red } elseif ($pct -ge 60) { $pal.amber } else { $pal.green }
+        $reset = try { Format-Reset $row.Resets } catch { '--' }
+        $out += @{ text = ('{0:N0}%/{1}' -f $pct, $reset); color = $c }
+    }
+    return , $out
+}
+
+function Draw-Taskbar {
+    if (-not $taskbarMode) { return }
+    $pal = Get-TaskbarPalette
+    $script:tbPalette = $pal
+    $strip.Children.Clear()
+    foreach ($p in $enabledProviders) {
+        $data = if ($script:lastGood.ContainsKey($p.key)) { $script:lastGood[$p.key] } else { $null }
+        $item = New-Object System.Windows.Controls.StackPanel
+        $item.Orientation = 'Horizontal'
+        $item.VerticalAlignment = 'Center'
+        $item.Margin = New-Object System.Windows.Thickness 6, 0, 6, 0
+        $glyphColor = if ($p.key -eq 'opencode') { $pal.opencode } elseif ($accent.ContainsKey($p.key)) { $accent[$p.key] } else { $pal.muted }
+        $item.Children.Add((New-Glyph $p.key $glyphColor)) | Out-Null
+        $col = New-Object System.Windows.Controls.StackPanel
+        $col.VerticalAlignment = 'Center'
+        foreach ($ln in (Get-TaskbarLines $data $pal)) {
+            $tb = New-Object System.Windows.Controls.TextBlock
+            $tb.Text = $ln.text
+            $tb.FontFamily = New-Object System.Windows.Media.FontFamily 'Cascadia Mono, Consolas'
+            $tb.FontSize = 11.5
+            $tb.Foreground = New-Brush $ln.color
+            $col.Children.Add($tb) | Out-Null
+        }
+        $item.Children.Add($col) | Out-Null
+        $strip.Children.Add($item) | Out-Null
+    }
+    if ($strip.Children.Count -eq 0) {
+        $tb = New-Object System.Windows.Controls.TextBlock
+        $tb.Text = 'usage: loading...'
+        $tb.Foreground = New-Brush $pal.muted
+        $strip.Children.Add($tb) | Out-Null
+    }
+}
+
+# Keep the strip glued to the taskbar: same height, left edge when the icons
+# are centered (Windows 11 default), or just left of the clock when they are
+# left-aligned. Hidden while the taskbar is (auto-hide, fullscreen apps).
+$script:tbHidden = $false
+function Set-TaskbarPosition {
+    if (-not $taskbarMode) { return }
+    $r = [Win32Ex]::TaskbarRect()
+    $src = [System.Windows.PresentationSource]::FromVisual($tbWin)
+    $hide = $true
+    if ($r -and $src) {
+        $m = $src.CompositionTarget.TransformFromDevice
+        $left = $r[0] * $m.M11; $top = $r[1] * $m.M22; $right = $r[2] * $m.M11; $bottom = $r[3] * $m.M22
+        $screenH = [System.Windows.SystemParameters]::PrimaryScreenHeight
+        $hide = $script:stripHidden -or (($bottom - $top) -lt 20) -or ($top -ge $screenH - 4) -or [Win32Ex]::ForegroundIsFullscreen()
+        if (-not $hide) {
+            $tbWin.Height = $bottom - $top
+            $tbWin.Top = $top
+            $al = $null
+            try { $al = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced' -ErrorAction Stop).TaskbarAl } catch {}
+            $tray = if ($al -eq 0) { [Win32Ex]::TrayRect() } else { $null }
+            $tbWin.Left = if ($tray) { $tray[0] * $m.M11 - $tbWin.ActualWidth - $cfg.taskbarOffset }
+                          else { $left + $cfg.taskbarOffset }
+        }
+    }
+    if ($hide -ne $script:tbHidden) {
+        $script:tbHidden = $hide
+        if ($hide) { $tbWin.Hide() } else { $tbWin.Show() }
+    }
+    if (-not $hide) {
+        [Win32Ex]::BringToTop((New-Object System.Windows.Interop.WindowInteropHelper($tbWin)).Handle)
+    }
 }
 
 # One tick: start any due fetches, then redraw from current data. Results that
@@ -581,6 +862,16 @@ function Render {
 
 function Set-Position {
     $wa = [System.Windows.SystemParameters]::WorkArea
+    if ($taskbarMode) {
+        # detail overlay pops up just above the strip, like a flyout
+        $window.Left = [Math]::Max($wa.Left, [Math]::Min($tbWin.Left, $wa.Right - $window.ActualWidth))
+        $window.Top = [Math]::Max($wa.Top, $tbWin.Top - $window.ActualHeight - 8)
+        $btnWindow.Left = if ($window.Left - 34 -ge $wa.Left) { $window.Left - 34 }
+                          else { $window.Left + $window.ActualWidth + 4 }
+        $btnWindow.Top = $window.Top - 4
+        if ($script:panelOpen) { Set-PanelPosition }
+        return
+    }
     # a dragged position (saved as x/y in config.json) wins over the corner,
     # but is clamped to the current work area so a monitor change (or a
     # corrupted value) can never push the click-through overlay off-screen
@@ -641,7 +932,8 @@ $ctrlTimer.Add_Tick({
         $window.Cursor = if ($ctrlDown) { [System.Windows.Input.Cursors]::SizeAll } else { $null }
     }
 })
-$ctrlTimer.Start()
+# (taskbar mode: the strip is the anchor and the detail overlay follows it)
+if (-not $taskbarMode) { $ctrlTimer.Start() }
 
 $window.Add_MouseLeftButtonDown({
     if (-not $script:interactive) { return }
@@ -662,16 +954,50 @@ $timer = New-Object System.Windows.Threading.DispatcherTimer
 $timer.Interval = [TimeSpan]::FromSeconds($cfg.refreshSeconds)
 $timer.Add_Tick({ try { Render } catch {} })
 
-$window.Add_Loaded({
+$script:started = $false
+function Start-Engine {
+    if ($script:started) { return }
+    $script:started = $true
     try { Render } catch {}
     $timer.Start()
     $collector.Start()
-})
+}
+$window.Add_Loaded({ Start-Engine })
+$tbWin.Add_Loaded({ Start-Engine })
 
 Build-Panel
 
-$window.Show()
-$btnWindow.Show()
+if ($taskbarMode) {
+    # the detail overlay starts hidden; handles are realized now so the
+    # hotkey and ex-styles are in place before it is first shown
+    $window.Show(); $window.Hide()
+    $btnWindow.Show(); $btnWindow.Hide()
+    $script:overlayVisible = $false
+    $tbWin.Show()
+    $tbBorder.Add_MouseEnter({ $tbBorder.Background = New-Brush $script:tbPalette.hover })
+    $tbBorder.Add_MouseLeave({ $tbBorder.Background = New-Brush '#01808080' })
+    $tbWin.Add_MouseRightButtonUp({ try { $trayMenu.Show([System.Windows.Forms.Cursor]::Position) } catch {} })
+    $tbWin.Add_SizeChanged({ try { Set-TaskbarPosition } catch {} })
+    # cheap poll: follows taskbar moves/resizes, theme switches and
+    # fullscreen apps, and re-raises the strip after a taskbar click
+    $script:tbTick = 0
+    $tbTimer = New-Object System.Windows.Threading.DispatcherTimer
+    $tbTimer.Interval = [TimeSpan]::FromMilliseconds(400)
+    $tbTimer.Add_Tick({
+        try {
+            Set-TaskbarPosition
+            $script:tbTick++
+            # theme switch: redraw with the matching palette (every ~4s)
+            if ($script:tbTick % 10 -eq 0 -and (Get-TaskbarPalette).light -ne $script:tbPalette.light) { Draw-Taskbar }
+        } catch {}
+    })
+    $tbTimer.Start()
+    Draw-Taskbar
+    Set-TaskbarPosition
+} else {
+    $window.Show()
+    $btnWindow.Show()
+}
 $panel.Show(); $panel.Hide()   # realize handle + ex-style, then keep hidden
 Set-Position
 
@@ -741,6 +1067,7 @@ $trayMenu.Renderer = New-Object DarkMenuRenderer
 $trayMenu.ShowImageMargin = $false   # drop the empty icon gutter on the left
 $trayMenu.Font = New-Object System.Drawing.Font('Segoe UI', 9)
 $trayMenu.ForeColor = [System.Drawing.Color]::FromArgb(201, 209, 217)
+$null = $trayMenu.Items.Add('Show/Hide (Ctrl+Alt+U)', $null, { try { Toggle-Overlay } catch {} })
 $null = $trayMenu.Items.Add('Refresh now', $null, { try { Start-Fetch $true; Draw } catch {} })
 $null = $trayMenu.Items.Add('Restart', $null, {
     # a single quoted string, not an array: PowerShell 5.1's Start-Process
@@ -759,5 +1086,9 @@ $notify.ContextMenuStrip = $trayMenu
 $app.Run() | Out-Null
 $notify.Visible = $false
 $notify.Dispose()
+try {
+    $hwnd = (New-Object System.Windows.Interop.WindowInteropHelper($window)).Handle
+    [Win32Ex]::UnregisterHotKey($hwnd, $HOTKEY_ID) | Out-Null
+} catch {}
 try { $pool.Close(); $pool.Dispose() } catch {}
 Remove-Item $pidFile -ErrorAction SilentlyContinue

@@ -1,4 +1,6 @@
 {
+  "mode": "overlay",
+  "taskbarOffset": 12,
   "corner": "top-right",
   "marginX": 14,
   "marginY": 14,

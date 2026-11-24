@@ -44,7 +44,11 @@ all (Windows 11's default terminal ignores `-WindowStyle Hidden`, so running
 the `.ps1` directly leaves a stray window; the `.vbs` launcher does not).
 
 Once running, use the tray icon (next to the clock): right-click it for
-Refresh now, Restart, and Exit.
+Show/Hide, Refresh now, Restart, and Exit.
+
+Press `Ctrl+Alt+U` anywhere to show or hide the overlay instantly, without
+needing to reach for the tray icon. Background fetching keeps running while
+hidden, so the numbers are current the moment it reappears.
 
 ## Moving the overlay
 
@@ -53,6 +57,20 @@ anywhere on screen. The position is saved automatically and wins over the
 `corner` setting below; delete the auto-written `x`/`y` keys from
 `config.json` to go back to docking by corner.
 
+## Taskbar mode
+
+Set `"mode": "taskbar"` in `config.json` to get a compact strip in the empty
+left part of the Windows 11 taskbar instead of the floating box: one pixel-art
+glyph per tool (the same ones as the GNOME port) with `pct/reset` for its first
+two rows, coloured green/amber/red. Right click it for the tray menu;
+`Ctrl+Alt+U` (or tray -> Show/Hide) hides and shows the strip. It follows the light/dark system theme, hides with fullscreen apps and
+an auto-hidden taskbar, and moves next to the clock if the taskbar icons are
+left-aligned. If the Widgets button (weather) sits at the far left, raise
+`taskbarOffset` to clear it.
+
+Windows 11 has no API for third-party taskbar bands, so this is a topmost
+window kept aligned to the taskbar, not a real part of it.
+
 ## Configuration (optional)
 
 Copy `config.example.json` to `config.json` and edit what you need. Missing
@@ -60,10 +78,12 @@ keys keep their defaults; `config.json` is git-ignored.
 
 | Key | Values | Meaning |
 |-----|--------|---------|
+| `mode` | `overlay` (default), `taskbar` | Floating box, or a compact strip in the taskbar (see above). |
+| `taskbarOffset` | pixels, default 12 | Taskbar mode: gap from the taskbar's left edge (or from the clock when icons are left-aligned). |
 | `corner` | `top-right`, `top-left`, `bottom-right`, `bottom-left` | Screen corner the overlay docks to. |
 | `marginX`, `marginY` | pixels | Distance from the work-area edge. |
 | `refreshSeconds` | 15 or more | Redraw interval. Remote APIs are still polled only every 3rd tick. |
-| `sections` | `"auto"` or e.g. `["claude", "codex"]` | `auto` shows only the tools with local data on this machine. |
+| `sections` | `"auto"` or e.g. `["claude", "codex"]` | `auto` shows only the tools used on this machine in the last 30 days (Copilot: whenever its token is set). |
 | `githubUser`, `githubToken` | your login, a PAT | Enables the `COPILT` section. Create a fine-grained personal access token with Account permissions -> Plan -> Read-only, nothing else. |
 | `copilotIncluded` | number, default 200 | Monthly AI credits included in your Copilot plan, used to compute the percentage (the API only reports consumption, not the limit). |
 | `x`, `y` | pixels or `null` | Auto-written when you Ctrl+drag the overlay. Leave them `null` (or delete them) to dock by `corner` instead. |
