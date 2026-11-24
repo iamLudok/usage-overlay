@@ -1061,7 +1061,9 @@ $g.Dispose()
 $script:trayIcon = [System.Drawing.Icon]::FromHandle($script:trayBmp.GetHicon())
 $notify.Icon = $script:trayIcon
 $notify.Text = 'usage overlay'
-$notify.Visible = $true
+# taskbar mode: right-clicking the strip opens this same menu, so a tray
+# icon next to the clock would only duplicate it
+$notify.Visible = -not $taskbarMode
 $trayMenu = New-Object System.Windows.Forms.ContextMenuStrip
 $trayMenu.Renderer = New-Object DarkMenuRenderer
 $trayMenu.ShowImageMargin = $false   # drop the empty icon gutter on the left

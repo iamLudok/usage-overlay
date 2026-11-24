@@ -62,9 +62,11 @@ anywhere on screen. The position is saved automatically and wins over the
 Set `"mode": "taskbar"` in `config.json` to get a compact strip in the empty
 left part of the Windows 11 taskbar instead of the floating box: one pixel-art
 glyph per tool (the same ones as the GNOME port) with `pct/reset` for its first
-two rows, coloured green/amber/red. Right click it for the tray menu;
-`Ctrl+Alt+U` (or tray -> Show/Hide) hides and shows the strip. It follows the light/dark system theme, hides with fullscreen apps and
-an auto-hidden taskbar, and moves next to the clock if the taskbar icons are
+two rows, coloured green/amber/red. Right click it for the menu (Show/Hide,
+Refresh now, Restart, Exit); there is no tray icon in this mode, since it
+would only duplicate that menu. `Ctrl+Alt+U` hides and shows the strip. It
+follows the light/dark system theme, hides with fullscreen apps and an
+auto-hidden taskbar, and moves next to the clock if the taskbar icons are
 left-aligned. If the Widgets button (weather) sits at the far left, raise
 `taskbarOffset` to clear it.
 
